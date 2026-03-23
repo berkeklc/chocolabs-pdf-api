@@ -1,0 +1,4 @@
+Flask==3.1.*
+flask-cors==5.*
+PyMuPDF==1.25.*
+gunicorn==23.*
