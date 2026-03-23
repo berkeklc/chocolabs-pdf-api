@@ -112,24 +112,34 @@ def generate_pdf(items):
         preserved_labels = find_preserved_labels(page)
         page_items = [i for i in items if i['page'] == pnum]
 
-        # STEP 1: Redaction
+        # STEP 1: Redaction - Optimize target lookup
+        targets = []
         for item in page_items:
             for p_type in ['price', 'mini_price']:
                 val = item.get(p_type)
                 px = item.get(f'{p_type}_x', 0)
                 py = item.get(f'{p_type}_y', 0)
-                if not val or px <= 0 or py <= 0:
-                    continue
-                target_y = p_height - py
-                for span in all_spans:
-                    if abs(span['origin'][1] - target_y) < 2.5 and abs(span['origin'][0] - px) < 5:
-                        page.add_redact_annot(span['bbox'], fill=None)
+                if val and px > 0 and py > 0:
+                    targets.append((px, p_height - py))
 
-        for anchor in tl_anchors:
-            for span in all_spans:
-                if abs(span['origin'][1] - anchor['y']) < 0.5:
-                    if span['text'].strip() == 'TL' and abs(span['origin'][0] - anchor['x']) < 5:
+        for span in all_spans:
+            is_redacted = False
+            # Price hedefleriyle eşleşiyor mu?
+            for px, ty in targets:
+                if abs(span['origin'][1] - ty) < 2.5 and abs(span['origin'][0] - px) < 5:
+                    page.add_redact_annot(span['bbox'], fill=None)
+                    is_redacted = True
+                    break
+            
+            if is_redacted:
+                continue
+                
+            # TL yazılarıyla eşleşiyor mu?
+            if span['text'].strip() == 'TL':
+                for anchor in tl_anchors:
+                    if abs(span['origin'][1] - anchor['y']) < 0.5 and abs(span['origin'][0] - anchor['x']) < 5:
                         page.add_redact_annot(span['bbox'], fill=None)
+                        break
 
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=False)
 
@@ -192,9 +202,9 @@ def generate_pdf(items):
                 ax = get_best_anchor(px, ty, pnum)
                 insert_val(ax, val, ty, fs)
 
-    # Geçici dosyaya kaydet
+    # Geçici dosyaya kaydet - OPTİMİZASYON: garbage=1 kullan (çok daha hızlı)
     output_path = os.path.join(tempfile.gettempdir(), 'output_menu.pdf')
-    doc.save(output_path, garbage=4, deflate=True)
+    doc.save(output_path, garbage=1, deflate=False)
     doc.close()
 
     # Font dosyalarını temizle
@@ -203,7 +213,6 @@ def generate_pdf(items):
             os.remove(p)
 
     return output_path
-
 
 @app.route('/', methods=['GET'])
 def index():
