@@ -76,13 +76,13 @@ def generate_pdf(items):
                         txt = s['text'].strip()
                         if "TL" in txt and not is_same_text(txt, "TL"):
                             rect = fitz.Rect(s['bbox'])
-                            page.add_redact_annot(rect, opacity=0)
+                            page.add_redact_annot(rect)
                             redacted = True
                         elif txt and txt.replace('.', '').replace(',', '').isdigit():
                             rect = fitz.Rect(s['bbox'])
                             rect.x0 -= 1
                             rect.x1 += 1
-                            page.add_redact_annot(rect, opacity=0)
+                            page.add_redact_annot(rect)
                             redacted = True
                 
                 if redacted or num_new:
