@@ -24,9 +24,15 @@ STATIC_JSON = os.path.join(BASE_DIR, 'static_data.json')
 FONT_SEMIBOLD = os.path.join(BASE_DIR, 'font_semibold.cff')
 FONT_REGULAR = os.path.join(BASE_DIR, 'font_regular.cff')
 
-# Load static data once at startup (tiny JSON, ~200KB)
-with open(STATIC_JSON, 'r', encoding='utf-8') as f:
-    STATIC_DATA = json.load(f)
+# Load static data lazily (on first request, not at startup)
+_STATIC_DATA = None
+
+def get_static_data():
+    global _STATIC_DATA
+    if _STATIC_DATA is None:
+        with open(STATIC_JSON, 'r', encoding='utf-8') as f:
+            _STATIC_DATA = json.load(f)
+    return _STATIC_DATA
 
 
 def color_to_tuple(c):
