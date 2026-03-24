@@ -21,8 +21,8 @@ CORS(app)
 BASE_DIR = os.path.dirname(__file__)
 BLANK_PDF = os.path.join(BASE_DIR, 'menu_blank.pdf')
 STATIC_JSON = os.path.join(BASE_DIR, 'static_data.json')
-FONT_SEMIBOLD = os.path.join(BASE_DIR, 'font_semibold.cff')
-FONT_REGULAR = os.path.join(BASE_DIR, 'font_regular.cff')
+FONT_SEMIBOLD = os.path.join(BASE_DIR, 'Oswald-SemiBold.ttf')
+FONT_REGULAR = os.path.join(BASE_DIR, 'Oswald-Regular.ttf')
 
 # Load static data lazily (on first request, not at startup)
 _STATIC_DATA = None
