@@ -162,8 +162,8 @@ def generate_pdf(items):
                     # check if string matches
                     if is_same_text(txt, item.get('name')) or \
                        is_same_text(txt, item.get('gram')) or \
-                       is_same_text(txt, item.get('price', '').replace(' TL','')) or \
-                       is_same_text(txt, item.get('mini_price', '').replace(' TL','')):
+                       is_same_text(txt, (item.get('price') or '').replace(' TL','')) or \
+                       is_same_text(txt, (item.get('mini_price') or '').replace(' TL','')):
                         is_dynamic_item = True
                         break
                     # Desc is multiline, check substring
