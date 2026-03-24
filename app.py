@@ -112,34 +112,57 @@ def generate_pdf(items):
         preserved_labels = find_preserved_labels(page)
         page_items = [i for i in items if i['page'] == pnum]
 
-        # STEP 1: Redaction - Optimize target lookup
-        targets = []
+        # STEP 1: Compute Y shifts for active items
+        categories = {}
         for item in page_items:
-            for p_type in ['price', 'mini_price']:
-                val = item.get(p_type)
-                px = item.get(f'{p_type}_x', 0)
-                py = item.get(f'{p_type}_y', 0)
-                if val and px > 0 and py > 0:
-                    targets.append((px, p_height - py))
-
-        for span in all_spans:
-            is_redacted = False
-            # Price hedefleriyle eşleşiyor mu?
-            for px, ty in targets:
-                if abs(span['origin'][1] - ty) < 2.5 and abs(span['origin'][0] - px) < 5:
-                    page.add_redact_annot(span['bbox'], fill=None)
-                    is_redacted = True
-                    break
+            cat = item.get('category_id', 0)
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(item)
             
-            if is_redacted:
-                continue
+        for cat, cat_items in categories.items():
+            original_ys = [i.get('name_y', 0) for i in cat_items]
+            active_items = [i for i in cat_items if i.get('is_active', 1) == 1]
+            
+            for index, a_item in enumerate(active_items):
+                orig_name_y = a_item.get('name_y', 0)
+                target_name_y = original_ys[index] if index < len(original_ys) else orig_name_y
+                a_item['shifted_y'] = target_name_y - orig_name_y
+
+        # STEP 2: Redaction
+        for item in page_items:
+            is_active = item.get('is_active', 1) == 1
+            shift = item.get('shifted_y', 0)
+            
+            # Inactive items or shifted active items must be completely redacted
+            fields_to_redact = ['name', 'desc', 'gram', 'price', 'mini_price'] if (not is_active or shift != 0) else ['price', 'mini_price']
+            
+            for k in fields_to_redact:
+                val = item.get(k)
+                if not val: continue
+                # target_y is the original Y coordinate
+                y_coord = item.get(f"{k}_y", 0)
+                if not y_coord: continue
+                target_y = p_height - y_coord
                 
-            # TL yazılarıyla eşleşiyor mu?
-            if span['text'].strip() == 'TL':
-                for anchor in tl_anchors:
-                    if abs(span['origin'][1] - anchor['y']) < 0.5 and abs(span['origin'][0] - anchor['x']) < 5:
-                        page.add_redact_annot(span['bbox'], fill=None)
-                        break
+                val_str = str(val).strip()
+                for line in val_str.split('\n'):
+                    l = line.strip()
+                    if not l: continue
+                    rects = page.search_for(l)
+                    for r in rects:
+                        if r.y0 - 20 <= target_y <= r.y1 + 20:
+                            page.add_redact_annot(r, fill=None)
+                            
+                # Special wipe for 'TL' on prices if it wasn't caught by search_for
+                if k in ['price', 'mini_price']:
+                    px = item.get(f"{k}_x")
+                    if px:
+                        for anchor in tl_anchors:
+                            if abs(anchor['y'] - target_y) < 3.5 and abs(anchor['x'] - px) < 15:
+                                for span in all_spans:
+                                    if span['text'].strip() == 'TL' and abs(span['origin'][1] - anchor['y']) < 0.5 and abs(span['origin'][0] - anchor['x']) < 5:
+                                        page.add_redact_annot(span['bbox'], fill=None)
 
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=False)
 
@@ -148,7 +171,7 @@ def generate_pdf(items):
         if regular_path:
             page.insert_font(fontname="regular_font", fontfile=regular_path)
 
-        # STEP 2: Preserved labels geri yükle
+        # STEP 2.5: Preserved labels geri yükle
         for label in preserved_labels:
             try:
                 fname = "regular_font" if regular_path else "helv"
@@ -159,7 +182,7 @@ def generate_pdf(items):
             except:
                 pass
 
-        # STEP 3: Yeni fiyatları yaz
+        # STEP 3: Active ürünleri çiz
         def get_best_anchor(orig_x, y, p_no):
             best_ax, min_dist = None, 999
             for anchor in tl_anchors:
@@ -191,16 +214,57 @@ def generate_pdf(items):
                 pass
 
         for item in page_items:
+            if item.get('is_active', 1) == 0:
+                continue
+                
+            shift = item.get('shifted_y', 0)
+            
+            # Eğer shift != 0 ise sildiğimiz ad, içerik ve gramajı yeniden shifted pozisyona çiziyoruz
+            if shift != 0:
+                name = item.get('name')
+                if name:
+                    nx = item.get('name_x', 0)
+                    ny = p_height - (item.get('name_y', 0) + shift)
+                    fname = "price_font" if semibold_path else "helv"
+                    fsize = item.get('name_font_size') or 9.5
+                    try: page.insert_text((nx, ny), name, fontsize=fsize, fontname=fname, color=(1,1,1))
+                    except: pass
+                    
+                desc = item.get('desc')
+                if desc:
+                    dx = item.get('desc_x', 0)
+                    dy = p_height - (item.get('desc_y', 0) + shift)
+                    fname = "regular_font" if regular_path else "helv"
+                    fsize = item.get('desc_font_size') or 6.0
+                    try: 
+                        for i, l in enumerate(desc.split('\n')):
+                            page.insert_text((dx, dy + i*(fsize*1.2)), l.strip(), fontsize=fsize, fontname=fname, color=(1,1,1))
+                    except: pass
+                    
+                gram = item.get('gram')
+                if gram:
+                    gx = item.get('gram_x', 0)
+                    gy = p_height - (item.get('gram_y', 0) + shift)
+                    fname = "regular_font" if regular_path else "helv"
+                    fsize = item.get('gram_font_size') or 5.5
+                    try: page.insert_text((gx, gy), gram, fontsize=fsize, fontname=fname, color=(1,1,1))
+                    except: pass
+
+            # Fiyatları her zaman çiziyoruz (çünkü her zaman sildik)
             for p_type in ['price', 'mini_price']:
                 val = item.get(p_type)
                 px = item.get(f'{p_type}_x', 0)
                 py = item.get(f'{p_type}_y', 0)
                 if not val or px <= 0 or py <= 0:
                     continue
-                ty = p_height - py
-                fs = item.get('price_font_size') or 6.4324
-                ax = get_best_anchor(px, ty, pnum)
-                insert_val(ax, val, ty, fs)
+                
+                shifted_y = p_height - (py + shift)
+                fs = item.get(f'{p_type}_font_size') or 6.4324
+                
+                original_ty = p_height - py
+                ax = get_best_anchor(px, original_ty, pnum)
+                if ax:
+                    insert_val(ax, val, shifted_y, fs)
 
     # Geçici dosyaya kaydet - OPTİMİZASYON: garbage=1 kullan (çok daha hızlı)
     output_path = os.path.join(tempfile.gettempdir(), 'output_menu.pdf')
