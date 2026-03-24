@@ -2,333 +2,281 @@
 Chocolabs Menu PDF API
 Flask API - menu verilerini alıp PyMuPDF ile temiz PDF oluşturur.
 Render.com veya benzeri platformda deploy edilir.
+
+NOT: menu.pdf RUNTIME'DA AÇILMAZ. Tüm fontlar ve statik veriler
+preextract.py ile önceden çıkarılmış ve repo'ya commitlenmiştir.
+Bu sayede bellek kullanımı ~20MB ile sınırlı kalır.
 """
 import fitz
 import os
-import sys
 import tempfile
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 import json
 
 app = Flask(__name__)
-CORS(app)  # Shared hosting'den gelen isteklere izin ver
+CORS(app)
 
-TEMPLATE_PDF = os.path.join(os.path.dirname(__file__), 'menu.pdf')
+# Pre-extracted data paths (committed to repo, never changes at runtime)
+BASE_DIR = os.path.dirname(__file__)
+BLANK_PDF = os.path.join(BASE_DIR, 'menu_blank.pdf')
+STATIC_JSON = os.path.join(BASE_DIR, 'static_data.json')
+FONT_SEMIBOLD = os.path.join(BASE_DIR, 'font_semibold.cff')
+FONT_REGULAR = os.path.join(BASE_DIR, 'font_regular.cff')
 
-
-def extract_fonts(doc):
-    """PDF'den SemiBold ve Regular fontları çıkar."""
-    page = doc[0]
-    fonts = page.get_fonts(full=True)
-    semibold_path, regular_path = None, None
-    for f in fonts:
-        xref, name = f[0], f[3]
-        if 'MetronicSlabNarrowSemiBold' in name and 'Ital' not in name:
-            font_data = doc.extract_font(xref)
-            ext, content = font_data[1], font_data[3]
-            if content:
-                semibold_path = os.path.join(tempfile.gettempdir(), f"menu_semibold.{ext}")
-                with open(semibold_path, "wb") as fp:
-                    fp.write(content)
-        if 'MetronicSlabNarrowRegular' in name:
-            font_data = doc.extract_font(xref)
-            ext, content = font_data[1], font_data[3]
-            if content:
-                regular_path = os.path.join(tempfile.gettempdir(), f"menu_regular.{ext}")
-                with open(regular_path, "wb") as fp:
-                    fp.write(content)
-    return semibold_path, regular_path
+# Load static data once at startup (tiny JSON, ~200KB)
+with open(STATIC_JSON, 'r', encoding='utf-8') as f:
+    STATIC_DATA = json.load(f)
 
 
 def color_to_tuple(c):
     if isinstance(c, (list, tuple)):
-        return c
+        return tuple(c)
     r = ((c >> 16) & 0xFF) / 255.0
     g = ((c >> 8) & 0xFF) / 255.0
     b = (c & 0xFF) / 255.0
     return (r, g, b)
 
 
-def find_preserved_labels(page):
-    """Küçük stilistik etiketleri bul (size < 3.0)."""
-    labels = []
-    text_dict = page.get_text("dict")
-    for block in text_dict["blocks"]:
-        if block["type"] != 0:
-            continue
-        for line in block["lines"]:
-            for span in line["spans"]:
-                if span['size'] < 3.0:
-                    labels.append({
-                        'text': span['text'],
-                        'origin': span['origin'],
-                        'font': span['font'],
-                        'size': span['size'],
-                        'color': color_to_tuple(span['color']),
-                        'bbox': span['bbox']
-                    })
-    return labels
-
-
-def is_same_text(s1, s2):
-    return str(s1).strip() == str(s2).strip()
-
 def generate_pdf(items):
-    """Menu_blank.pdf uzerine sifirdan yepyeni, mukemmel hizali menu cizer."""
-    BLANK_PDF = os.path.join(os.path.dirname(__file__), 'menu_blank.pdf')
-    ORIGINAL_PDF = os.path.join(os.path.dirname(__file__), 'menu.pdf')
+    """
+    menu_blank.pdf üzerine sıfırdan menü çizer.
+    menu.pdf AÇILMAZ - fontlar ve statik veriler dosyadan okunur.
+    """
     if not os.path.exists(BLANK_PDF):
-        raise FileNotFoundError("menu_blank.pdf şablonu bulunamadı")
-        
-    doc_orig = fitz.open(ORIGINAL_PDF)
-    doc_blank = fitz.open(BLANK_PDF)
-    
-    semibold_path, regular_path = extract_fonts(doc_orig)
-    semibold_font = fitz.Font(fontfile=semibold_path) if semibold_path else None
-    
-    FALLBACK_ANCHORS = {
-        1: {'regular': 176.95, 'mini': 157.94, 'right': 289.50},
-        2: {'left': 133.70, 'right': 288.60}
-    }
+        raise FileNotFoundError("menu_blank.pdf bulunamadı")
 
-    # Iterate over tools
-    for page_num in range(doc_blank.page_count):
-        page_orig = doc_orig[page_num] if page_num < doc_orig.page_count else None
-        page_blank = doc_blank[page_num]
-        p_height = page_blank.rect.height
+    doc = fitz.open(BLANK_PDF)
+    
+    # Load pre-extracted fonts
+    semibold_ok = os.path.exists(FONT_SEMIBOLD)
+    regular_ok = os.path.exists(FONT_REGULAR)
+    semibold_font = fitz.Font(fontfile=FONT_SEMIBOLD) if semibold_ok else None
+
+    for page_num in range(doc.page_count):
+        page = doc[page_num]
         pnum = page_num + 1
+        pnum_str = str(pnum)
         
-        # Original spandata
-        text_dict = page_orig.get_text("dict") if page_orig else {"blocks": []}
-        all_spans = []
-        tl_anchors = []
-        for block in text_dict["blocks"]:
-            if block["type"] != 0: continue
-            for line in block["lines"]:
-                for span in line["spans"]:
-                    all_spans.append(span)
-                    txt = span['text'].strip()
-                    if txt == 'TL':
-                        tl_anchors.append({'x': span['origin'][0], 'y': span['origin'][1]})
-                    elif txt.endswith(' TL'):
-                        fs = span['size']
-                        tl_width = semibold_font.text_length("TL", fontsize=fs) if semibold_font else fs * 2.0
-                        tl_start_x = span['bbox'][2] - tl_width
-                        tl_anchors.append({'x': tl_start_x, 'y': span['origin'][1]})
+        page_static = STATIC_DATA.get(pnum_str)
+        if not page_static:
+            continue
+            
+        p_height = page_static['page_height']
+        all_spans = page_static['spans']
 
+        # Register fonts on this page
+        if semibold_ok:
+            page.insert_font(fontname="f_semi", fontfile=FONT_SEMIBOLD)
+        if regular_ok:
+            page.insert_font(fontname="f_reg", fontfile=FONT_REGULAR)
+
+        # Items for this page
         page_items = [i for i in items if i.get('page') == pnum]
         
-        # We need to map page_items to PyMuPDF 'origin' Y coordinates (from top)
-        for i in page_items:
-            # DB defined coordinates are from the bottom. Convert to top-down for PyMuPDF
-            i['pymupdf_y'] = p_height - i.get('name_y', 0)
-            
-        def get_best_anchor(orig_x, y, p_no):
-            best_ax, min_dist = None, 999
-            for anchor in tl_anchors:
-                if abs(anchor['y'] - y) < 2.5:
-                    dist = anchor['x'] - orig_x
-                    if 0 < dist < min_dist:
-                        min_dist, best_ax = dist, anchor['x']
-            if best_ax: return best_ax
-            fb = FALLBACK_ANCHORS.get(p_no, {})
-            if p_no == 1:
-                if orig_x > 220: return fb.get('right', 289.5)
-                return fb.get('mini', 157.94) if orig_x < 155 else fb.get('regular', 176.95)
-            else:
-                return fb.get('right', 288.6) if orig_x > 150 else fb.get('left', 133.7)
+        # Convert DB coordinates (from bottom) to PyMuPDF (from top)
+        for item in page_items:
+            item['_y'] = p_height - item.get('name_y', 0)
 
-        # 1. Identify "Static Spans" (Headers, labels) from original PDF
-        # We find spans that DO NOT match any item's strings (name, desc, gram, price)
+        # --- STEP 1: Classify static spans ---
+        # Find which spans are "dynamic" (belong to menu items) vs "static" (headers/labels)
+        # Also collect TL anchor positions for price alignment
+        tl_anchors = []
         static_spans = []
+        
         for span in all_spans:
             txt = span['text'].strip()
-            if not txt: continue
-            
-            # The 'TL' signs next to prices will be handled by insert_val
-            # But the 'TL' in '360 TL' could be part of the price string.
-            if txt == 'TL':
+            if not txt:
                 continue
-                
-            y_topdown = span['origin'][1]
-            x_left = span['origin'][0]
             
-            is_dynamic_item = False
+            # Collect TL anchors for price alignment
+            if txt == 'TL':
+                tl_anchors.append({'x': span['x'], 'y': span['y']})
+                continue
+            if txt.endswith(' TL'):
+                # Calculate where the "TL" portion starts
+                fs = span['size']
+                tl_w = semibold_font.text_length("TL", fontsize=fs) if semibold_font else fs * 2.0
+                tl_x = span['bbox'][2] - tl_w
+                tl_anchors.append({'x': tl_x, 'y': span['y']})
+                continue  # Price values will be drawn from DB data
+            
+            # Check if this span belongs to any menu item
+            is_item_text = False
+            sy = span['y']
             for item in page_items:
-                # We do rough Y matching
-                item_y = item['pymupdf_y']
-                if abs(y_topdown - item_y) < 25:
-                    # check if string matches
-                    if is_same_text(txt, item.get('name')) or \
-                       is_same_text(txt, item.get('gram')) or \
-                       is_same_text(txt, (item.get('price') or '').replace(' TL','')) or \
-                       is_same_text(txt, (item.get('mini_price') or '').replace(' TL','')):
-                        is_dynamic_item = True
-                        break
-                    # Desc is multiline, check substring
-                    if item.get('desc') and txt in str(item.get('desc')):
-                        is_dynamic_item = True
+                iy = item['_y']
+                if abs(sy - iy) < 25:
+                    n = (item.get('name') or '').strip()
+                    g = (item.get('gram') or '').strip()
+                    d = str(item.get('desc') or '').strip()
+                    if txt == n or txt == g or (d and txt in d):
+                        is_item_text = True
                         break
             
-            if not is_dynamic_item:
+            if not is_item_text:
                 static_spans.append(span)
-                
-        # 2. Separate EVERYTHING (Active Items, Inactive Items, Static Spans) into 2 Columns
-        # Column 1: x < 300, Column 2: x >= 300
-        # Exception: Wide spans at the top "FİYATLAR ... DAHİLDİR" (x<300 but very wide).
-        col1 = []
-        col2 = []
+
+        # --- STEP 2: Build column elements ---
+        MID_X = 290  # Left/right column boundary
+        col1 = []  # Left column
+        col2 = []  # Right column
         
-        # Add static spans to columns
         for s in static_spans:
-            x, y = s['origin'][0], s['origin'][1]
-            # Page center is approx 297. Right column elements usually start around 300.
-            # E.g. "ÇİKOLATA KUTULARI" is right column.
-            # Page width is ~595. Midpoint is 297.
-            if x < 290:
-                col1.append({'type': 'static', 'y': y, 'x': x, 'data': s})
+            entry = {'type': 'static', 'y': s['y'], 'x': s['x'], 'data': s}
+            if s['x'] < MID_X:
+                col1.append(entry)
             else:
-                col2.append({'type': 'static', 'y': y, 'x': x, 'data': s})
-                
-        # Add dynamic items to columns
+                col2.append(entry)
+        
         for item in page_items:
             x = item.get('name_x', 0)
-            y = item['pymupdf_y']
-            is_act = item.get('is_active', 1) == 1
-            cat = item.get('category_id', 0)
-            if x < 290:
-                col1.append({'type': 'item', 'y': y, 'x': x, 'is_act': is_act, 'data': item, 'cat': cat})
+            entry = {
+                'type': 'item', 'y': item['_y'], 'x': x,
+                'active': item.get('is_active', 1) == 1,
+                'cat': item.get('category_id', 0),
+                'data': item
+            }
+            if x < MID_X:
+                col1.append(entry)
             else:
-                col2.append({'type': 'item', 'y': y, 'x': x, 'is_act': is_act, 'data': item, 'cat': cat})
+                col2.append(entry)
 
-        # 3. Process cumulative shifts for each column
-        def process_column(col_elements):
-            col_elements.sort(key=lambda e: e['y']) # Sort Top to Bottom (smallest Y first)
+        # --- STEP 3: Process shifts per column ---
+        def process_column(col):
+            col.sort(key=lambda e: e['y'])
             
-            # Estimate standard item spacing for categories. Usually 20 points.
-            cat_spacing = {}
-            for i in range(len(col_elements)-1):
-                e1 = col_elements[i]
-                e2 = col_elements[i+1]
-                if e1['type'] == 'item' and e2['type'] == 'item' and e1['cat'] == e2['cat']:
-                    gap = e2['y'] - e1['y']
+            # Calculate typical row spacing per category
+            spacings = {}
+            for i in range(len(col) - 1):
+                a, b = col[i], col[i + 1]
+                if a['type'] == 'item' and b['type'] == 'item' and a['cat'] == b['cat']:
+                    gap = b['y'] - a['y']
                     if 10 < gap < 40:
-                        cat_spacing[e1['cat']] = gap
-                        
-            current_shift = 0 # How much to slide everything UPWARDS (subtract from PyMuPDF Y)
-            drawn_elements = []
+                        spacings[a['cat']] = gap
             
-            for e in col_elements:
-                if e['type'] == 'item' and not e['is_act']:
-                    # Item is deactivated! The space it occupied must be collapsed.
-                    # Increase the upward shift for all elements BELOW it.
-                    space = cat_spacing.get(e['cat'], 20.0)
-                    current_shift += space
+            shift = 0
+            result = []
+            for e in col:
+                if e['type'] == 'item' and not e['active']:
+                    shift += spacings.get(e['cat'], 20.0)
                 else:
-                    target_y = e['y'] - current_shift
-                    e['shifted_y'] = target_y
-                    drawn_elements.append(e)
-            return drawn_elements
+                    e['new_y'] = e['y'] - shift
+                    result.append(e)
+            return result
 
-        drawn_col1 = process_column(col1)
-        drawn_col2 = process_column(col2)
-        
-        all_drawn = drawn_col1 + drawn_col2
-        
-        if semibold_path: page_blank.insert_font(fontname="price_font", fontfile=semibold_path)
-        if regular_path: page_blank.insert_font(fontname="regular_font", fontfile=regular_path)
+        drawn = process_column(col1) + process_column(col2)
 
-        def insert_val(page_dst, anchor_x, price_str, ty, f_size):
-            if not price_str: return
-            num = price_str.replace(' TL', '').strip()
-            w = semibold_font.text_length(num, fontsize=f_size) if semibold_font else f_size * 0.5 * len(num)
+        # --- STEP 4: Price anchor helper ---
+        FALLBACK_ANCHORS = {
+            1: {'regular': 176.95, 'mini': 157.94, 'right': 289.50},
+            2: {'left': 133.70, 'right': 288.60}
+        }
+        
+        def get_anchor(orig_x, orig_y):
+            best, best_dist = None, 999
+            for a in tl_anchors:
+                if abs(a['y'] - orig_y) < 2.5:
+                    d = a['x'] - orig_x
+                    if 0 < d < best_dist:
+                        best_dist, best = d, a['x']
+            if best:
+                return best
+            fb = FALLBACK_ANCHORS.get(pnum, {})
+            if pnum == 1:
+                if orig_x > 220: return fb.get('right', 289.5)
+                return fb.get('mini', 157.94) if orig_x < 155 else fb.get('regular', 176.95)
+            return fb.get('right', 288.6) if orig_x > 150 else fb.get('left', 133.7)
+
+        def draw_price(anchor_x, price_str, y, fs):
+            if not price_str:
+                return
+            num = str(price_str).replace(' TL', '').strip()
+            if not num:
+                return
+            w = semibold_font.text_length(num, fontsize=fs) if semibold_font else fs * 0.5 * len(num)
             num_x = anchor_x - w - 1.6
-            fname = "price_font" if semibold_path else "helv"
+            fn = "f_semi" if semibold_ok else "helv"
             try:
-                page_dst.insert_text(point=(num_x, ty), text=num, fontsize=f_size, fontname=fname, color=(1, 1, 1))
-                page_dst.insert_text(point=(anchor_x, ty), text="TL", fontsize=f_size, fontname=fname, color=(1, 1, 1))
-            except: pass
+                page.insert_text((num_x, y), num, fontsize=fs, fontname=fn, color=(1, 1, 1))
+                page.insert_text((anchor_x, y), "TL", fontsize=fs, fontname=fn, color=(1, 1, 1))
+            except:
+                pass
 
-        # 4. Draw EVERYTHING onto menu_blank.pdf
-        for e in all_drawn:
-            target_y = e['shifted_y']
+        # --- STEP 5: Draw everything ---
+        for e in drawn:
+            ny = e['new_y']
             
             if e['type'] == 'static':
                 s = e['data']
-                # The text baseline originally was s['origin'][1]. We changed it to target_y.
-                new_origin = (s['origin'][0], target_y)
-                # s['font'] contains the original font name. We don't have the original font object mounted.
-                # However, most static texts use regular_font or price_font
-                fname = "price_font" if semibold_path else "helv"
-                if 'Regular' in s['font']:
-                    fname = "regular_font" if regular_path else "helv"
-                    
-                color = color_to_tuple(s.get('color', (1,1,1)))
-                try: page_blank.insert_text(point=new_origin, text=s['text'], fontsize=s['size'], fontname=fname, color=color)
-                except: pass
-                
+                fn = "f_semi" if semibold_ok else "helv"
+                if 'Regular' in s.get('font', '') or 'Regula' in s.get('font', ''):
+                    fn = "f_reg" if regular_ok else "helv"
+                color = color_to_tuple(s.get('color', [1, 1, 1]))
+                try:
+                    page.insert_text((s['x'], ny), s['text'], fontsize=s['size'], fontname=fn, color=color)
+                except:
+                    pass
+            
             elif e['type'] == 'item':
                 item = e['data']
-                shift = item['pymupdf_y'] - target_y # (How much it went up)
+                dy = item['_y'] - ny  # How much this item shifted up
                 
-                # Draw Name
+                # Name
                 name = item.get('name')
                 if name:
-                    nx = item.get('name_x', 0)
-                    ny = p_height - item.get('name_y', 0) - shift
-                    fname = "price_font" if semibold_path else "helv"
-                    fsize = item.get('name_font_size') or 9.5
-                    try: page_blank.insert_text((nx, ny), name, fontsize=fsize, fontname=fname, color=(1,1,1))
-                    except: pass
-                    
-                # Draw Desc
+                    fn = "f_semi" if semibold_ok else "helv"
+                    fs = item.get('name_font_size') or 9.5
+                    try:
+                        page.insert_text(
+                            (item.get('name_x', 0), p_height - item.get('name_y', 0) - dy),
+                            str(name), fontsize=fs, fontname=fn, color=(1, 1, 1))
+                    except:
+                        pass
+                
+                # Description
                 desc = item.get('desc')
                 if desc:
+                    fn = "f_reg" if regular_ok else "helv"
+                    fs = item.get('desc_font_size') or 6.0
                     dx = item.get('desc_x', 0)
-                    dy = p_height - item.get('desc_y', 0) - shift
-                    fname = "regular_font" if regular_path else "helv"
-                    fsize = item.get('desc_font_size') or 6.0
-                    try: 
-                        for i, l in enumerate(str(desc).split('\n')):
-                            page_blank.insert_text((dx, dy + i*(fsize*1.3)), l.strip(), fontsize=fsize, fontname=fname, color=(1,1,1))
-                    except: pass
-                    
-                # Draw Gram
+                    desc_y = p_height - item.get('desc_y', 0) - dy
+                    try:
+                        for li, line in enumerate(str(desc).split('\n')):
+                            page.insert_text((dx, desc_y + li * (fs * 1.3)), line.strip(), fontsize=fs, fontname=fn, color=(1, 1, 1))
+                    except:
+                        pass
+                
+                # Gram
                 gram = item.get('gram')
                 if gram:
-                    gx = item.get('gram_x', 0)
-                    gy = p_height - item.get('gram_y', 0) - shift
-                    fname = "regular_font" if regular_path else "helv"
-                    fsize = item.get('gram_font_size') or 5.5
-                    try: page_blank.insert_text((gx, gy), str(gram), fontsize=fsize, fontname=fname, color=(1,1,1))
-                    except: pass
-
+                    fn = "f_reg" if regular_ok else "helv"
+                    fs = item.get('gram_font_size') or 5.5
+                    try:
+                        page.insert_text(
+                            (item.get('gram_x', 0), p_height - item.get('gram_y', 0) - dy),
+                            str(gram), fontsize=fs, fontname=fn, color=(1, 1, 1))
+                    except:
+                        pass
+                
                 # Prices
-                for p_type in ['price', 'mini_price']:
-                    val = item.get(p_type)
-                    px = item.get(f'{p_type}_x', 0)
-                    py = item.get(f'{p_type}_y', 0)
-                    if not val or px <= 0 or py <= 0: continue
-                    
-                    shifted_py = p_height - py - shift
-                    fs = item.get(f'{p_type}_font_size') or 6.4324
-                    
-                    original_ty = p_height - py
-                    ax = get_best_anchor(px, original_ty, pnum)
+                for pt in ['price', 'mini_price']:
+                    val = item.get(pt)
+                    px = item.get(f'{pt}_x', 0)
+                    py_val = item.get(f'{pt}_y', 0)
+                    if not val or px <= 0 or py_val <= 0:
+                        continue
+                    fs = item.get(f'{pt}_font_size') or 6.43
+                    orig_y = p_height - py_val
+                    ax = get_anchor(px, orig_y)
                     if ax:
-                        insert_val(page_blank, ax, str(val), shifted_py, fs)
+                        draw_price(ax, str(val), p_height - py_val - dy, fs)
 
-    # Optimizasyon gerekmiyor cunku redaction yok ve kucuk dosyalar hizli kaydedilir
     output_path = os.path.join(tempfile.gettempdir(), 'output_menu.pdf')
-    doc_blank.save(output_path, garbage=3, deflate=True)
-    doc_orig.close()
-    doc_blank.close()
-
-    for p in [semibold_path, regular_path]:
-        if p and os.path.exists(p): os.remove(p)
-
+    doc.save(output_path, garbage=1, deflate=False)
+    doc.close()
     return output_path
+
 
 @app.route('/', methods=['GET'])
 def index():
@@ -341,21 +289,6 @@ def index():
 
 @app.route('/generate', methods=['POST'])
 def generate():
-    """
-    Menu item verilerini JSON olarak alır, PDF döner.
-    
-    POST body (JSON):
-    {
-        "items": [
-            {
-                "page": 1, "price": "360 TL", "price_x": 167.88, "price_y": 399.86,
-                "price_font_size": 5.16, "mini_price": "295 TL", 
-                "mini_price_x": 150.42, "mini_price_y": 399.86
-            },
-            ...
-        ]
-    }
-    """
     try:
         data = request.get_json(force=True)
         if not data or 'items' not in data:
@@ -371,7 +304,7 @@ def generate():
             output_path,
             mimetype='application/pdf',
             as_attachment=False,
-            download_name=f'chocolabs_menu.pdf'
+            download_name='chocolabs_menu.pdf'
         )
 
     except Exception as e:
