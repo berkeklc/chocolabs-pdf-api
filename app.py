@@ -14,27 +14,18 @@ def is_same_text(t1, t2):
     if not t1 or not t2: return False
     return t1.replace('\xa0', ' ').replace(' ', '').strip() == t2.replace('\xa0', ' ').replace(' ', '').strip()
 
-def extract_semibold_font(doc):
-    page = doc[0]
-    fonts = page.get_fonts(full=True)
-    for f in fonts:
-        if 'MetronicSlabNarrowSemiBo' in f[3] and 'Ital' not in f[3]:
-            ext, content = doc.extract_font(f[0])[1], doc.extract_font(f[0])[3]
-            p = os.path.join(tempfile.gettempdir(), f"font_semi.{ext}")
-            with open(p, "wb") as fp: fp.write(content)
-            return p
-    return None
+FONT_OSWALD = os.path.join(BASE_DIR, 'Oswald-SemiBold.ttf')
 
 def generate_pdf(items):
     doc = fitz.open(MENU_PDF)
-    font_path = extract_semibold_font(doc)
 
     for page_num in range(doc.page_count):
         page = doc[page_num]
         p_height = page.rect.height
         pnum = page_num + 1
 
-        if font_path: page.insert_font(fontname="f_semi", fontfile=font_path)
+        if os.path.exists(FONT_OSWALD):
+            page.insert_font(fontname="f_semi", fontfile=FONT_OSWALD)
 
         page_items = [i for i in items if i.get('page') == pnum]
         all_spans = []
@@ -91,7 +82,7 @@ def generate_pdf(items):
         page.apply_redactions()
 
         for ax, num, target_y, fs, draw_tl in draw_commands:
-            fn = "f_semi" if font_path else "helv"
+            fn = "f_semi" if os.path.exists(FONT_OSWALD) else "helv"
             # Orijinal Metronic Slab width approximation
             w = fs * 0.48 * len(num)
             try:
