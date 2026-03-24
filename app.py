@@ -64,7 +64,7 @@ def generate_pdf(items):
         pnum = page_num + 1
         pnum_str = str(pnum)
         
-        page_static = STATIC_DATA.get(pnum_str)
+        page_static = get_static_data().get(pnum_str)
         if not page_static:
             continue
             
